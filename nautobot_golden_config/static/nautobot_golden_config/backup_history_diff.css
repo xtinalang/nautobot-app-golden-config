@@ -1,0 +1,240 @@
+/*
+ * Backup History Diff -- side-by-side diff styling.
+ *
+ * Theme handling: Nautobot writes the user's chosen theme to a `theme` cookie and stamps
+ * `data-theme="light|dark"` on <html>. When the user has made no choice, no attribute is set and
+ * Nautobot itself falls back to the OS preference -- so `prefers-color-scheme` applies only in that
+ * unset case, which is why the media query below excludes an explicit `data-theme="light"`. That keeps
+ * "light theme on a dark OS" correct, which a bare media query would get backwards.
+ *
+ * Light is the base palette and dark overrides it, so there is no separate `data-theme="light"` block.
+ *
+ * All custom properties are scoped to `.gcd-scope` rather than `:root`, so nothing here leaks into
+ * the rest of the page.
+ */
+
+.gcd-scope {
+    --gcd-border: #d0d7de;
+    --gcd-panel-bg: transparent;
+    --gcd-header-bg: #f6f8fa;
+    --gcd-muted: #656d76;
+    --gcd-num-color: #6e7681;
+    --gcd-num-border: #eaecef;
+    --gcd-add-bg: #e6ffec;
+    --gcd-del-bg: #ffebe9;
+    --gcd-empty-bg: #f6f8fa;
+    --gcd-text: inherit;
+    --gcd-add-accent: #1a7f37;
+    --gcd-del-accent: #d1242f;
+}
+
+/* Explicit dark choice. */
+html[data-theme="dark"] .gcd-scope {
+    --gcd-border: #30363d;
+    --gcd-panel-bg: #0d1117;
+    --gcd-header-bg: #161b22;
+    --gcd-muted: #8b949e;
+    --gcd-num-color: #6e7681;
+    --gcd-num-border: #21262d;
+    --gcd-add-bg: rgba(46, 160, 67, .15);
+    --gcd-del-bg: rgba(248, 81, 73, .15);
+    --gcd-empty-bg: rgba(255, 255, 255, .03);
+    --gcd-text: inherit;
+    --gcd-add-accent: #3fb950;
+    --gcd-del-accent: #f85149;
+}
+
+/* No explicit choice (or an explicit dark one) plus a dark OS: follow the OS, same as Nautobot does. */
+@media (prefers-color-scheme: dark) {
+    html:not([data-theme="light"]) .gcd-scope {
+        --gcd-border: #30363d;
+        --gcd-panel-bg: #0d1117;
+        --gcd-header-bg: #161b22;
+        --gcd-muted: #8b949e;
+        --gcd-num-color: #6e7681;
+        --gcd-num-border: #21262d;
+        --gcd-add-bg: rgba(46, 160, 67, .15);
+        --gcd-del-bg: rgba(248, 81, 73, .15);
+        --gcd-empty-bg: rgba(255, 255, 255, .03);
+        --gcd-text: inherit;
+        --gcd-add-accent: #3fb950;
+        --gcd-del-accent: #f85149;
+    }
+}
+
+.gcd-title {
+    font-size: 20px;
+    font-weight: 600;
+    margin: 0 0 2px;
+}
+
+.gcd-subtle {
+    color: var(--gcd-muted);
+    font-size: 13px;
+    margin: 0 0 16px;
+}
+
+.gcd-selectors {
+    margin-bottom: 15px;
+}
+
+/*
+ * The selector row, the card row and the diff table all share ONE vertical split so each "Modified"
+ * element sits directly above the modified config column. That means the same Bootstrap col-md-6 grid
+ * for the first two, and an explicit 50% colgroup for the table (below). Anything that consumes
+ * horizontal space between the halves -- a flex gap, an arrow -- shifts the right half out of line.
+ */
+.gcd-cards {
+    margin: 12px 0 16px;
+}
+
+.gcd-card {
+    height: 100%;
+    border: 1px solid var(--gcd-border);
+    background: var(--gcd-panel-bg);
+    border-radius: 6px;
+    padding: 10px 16px;
+}
+
+/* Spacing lives on the button, not its wrapper: the script sets [hidden] on the button when it takes
+ * over submitting, and a hidden element contributes no margin -- so no dead gap above the cards. */
+.gcd-compare-submit {
+    margin-bottom: 15px;
+}
+
+.gcd-card.original {
+    border-left: 4px solid var(--gcd-del-accent);
+}
+
+.gcd-card.modified {
+    border-left: 4px solid var(--gcd-add-accent);
+}
+
+.gcd-tag {
+    font-size: 11px;
+    letter-spacing: .5px;
+    text-transform: uppercase;
+    font-weight: 600;
+}
+
+.gcd-card.original .gcd-tag {
+    color: var(--gcd-del-accent);
+}
+
+.gcd-card.modified .gcd-tag {
+    color: var(--gcd-add-accent);
+}
+
+.gcd-meta {
+    color: var(--gcd-muted);
+    font-size: 12px;
+}
+
+.gcd-hash {
+    font-family: monospace;
+    color: var(--gcd-muted);
+    font-size: 12px;
+}
+
+.gcd-diff {
+    border: 1px solid var(--gcd-border);
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--gcd-panel-bg);
+}
+
+.gcd-diff-header {
+    background: var(--gcd-header-bg);
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--gcd-border);
+    font-family: monospace;
+    font-size: 13px;
+}
+
+.gcd-add-count {
+    color: var(--gcd-add-accent);
+    font-weight: 600;
+    margin-left: 6px;
+}
+
+.gcd-del-count {
+    color: var(--gcd-del-accent);
+    font-weight: 600;
+    margin-left: 4px;
+}
+
+.gcd-scroll {
+    overflow-x: auto;
+}
+
+table.gcd-table {
+    width: 100%;
+    /* Fixed layout so the colgroup widths below are honoured and the divide lands at exactly 50%,
+     * rather than the browser sizing columns from whichever side has the longest config line. */
+    table-layout: fixed;
+    border-collapse: collapse;
+    font-family: monospace;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+/* Line-number gutters are fixed; each config column takes the rest of its own half. */
+.gcd-col-num {
+    width: 3.5em;
+}
+
+.gcd-col-text {
+    width: calc(50% - 3.5em);
+}
+
+table.gcd-table td {
+    padding: 0 10px;
+    vertical-align: top;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--gcd-text);
+}
+
+td.gcd-num {
+    text-align: right;
+    color: var(--gcd-num-color);
+    user-select: none;
+    border-right: 1px solid var(--gcd-num-border);
+    word-break: keep-all;
+    white-space: nowrap;
+}
+
+td.gc-add {
+    background: var(--gcd-add-bg);
+}
+
+td.gc-del {
+    background: var(--gcd-del-bg);
+}
+
+td.gc-empty {
+    background: var(--gcd-empty-bg);
+}
+
+.gcd-empty-msg {
+    padding: 12px;
+    color: var(--gcd-muted);
+}
+
+/* Device/IP picker on the standalone tool page: fields and the submit button on one row. */
+.gcd-picker-form {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 12px;
+    margin-bottom: 18px;
+}
+
+.gcd-back {
+    margin-bottom: 10px;
+}
+
+/* Fleet inventory: the bulk-action bar under the table. */
+.gcd-fleet-actions {
+    margin-top: 10px;
+}

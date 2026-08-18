@@ -1,0 +1,1 @@
+Added a "Sync Backup Version Table" job that populates the Backup History Diff index from backup history already in Git, so the fleet views reflect existing history rather than only backups taken after the index was enabled.

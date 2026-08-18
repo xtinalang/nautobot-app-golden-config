@@ -110,7 +110,13 @@ golden_config_setting = ui.ObjectDetailContent(
             label="Backup Configuration",
             section=ui.SectionChoices.RIGHT_HALF,
             weight=100,
-            fields=("backup_repository", "backup_path_template", "backup_test_connectivity"),
+            fields=(
+                "backup_repository",
+                "backup_path_template",
+                "backup_test_connectivity",
+                "backup_retention_days",
+                "backup_retention_count",
+            ),
             value_transforms={
                 "backup_path_template": [helpers.pre_tag],
             },

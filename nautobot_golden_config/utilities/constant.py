@@ -12,6 +12,12 @@ ENABLE_SOTAGG = PLUGIN_CFG["enable_sotagg"]
 ENABLE_PLAN = PLUGIN_CFG["enable_plan"]
 ENABLE_DEPLOY = PLUGIN_CFG["enable_deploy"]
 ENABLE_POSTPROCESSING = PLUGIN_CFG["enable_postprocessing"]
+ENABLE_BACKUP_DIFF_INDEX = PLUGIN_CFG["enable_backup_diff_index"]
+# Device ceiling for the git-native fleet list on the Backup History Diff landing page. That list walks
+# every in-scope device, so its cost is linear in fleet size: ~0.9s at 10K devices, ~9.6s at 100K. Above
+# this the page skips the walk and points at `enable_backup_diff_index` instead of hanging. Raise it if
+# you would rather wait; per-device diffs are unaffected either way.
+BACKUP_DIFF_MAX_FALLBACK_FLEET = PLUGIN_CFG["backup_diff_max_fallback_fleet"]
 DEFAULT_DEPLOY_STATUS = PLUGIN_CFG["default_deploy_status"]
 
 CONFIG_FEATURES = {

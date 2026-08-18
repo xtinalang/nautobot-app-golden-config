@@ -112,6 +112,7 @@ nav:
       - Getting Started: "user/app_getting_started.md"
       - Using the App: "user/app_use_cases.md"
       - Navigate Backup: "user/app_feature_backup.md"
+      - Navigate Backup History Diff: "user/app_feature_backup_diff.md"
       - Navigate Compliance: "user/app_feature_compliance.md"
       - Navigate Compliance CLI: "user/app_feature_compliancecli.md"
       - Navigate Compliance JSON: "user/app_feature_compliancejson.md"

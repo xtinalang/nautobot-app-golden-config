@@ -10,6 +10,7 @@ from django.utils.timezone import make_aware
 from nautobot.apps.jobs import (
     BooleanVar,
     ChoiceVar,
+    IntegerVar,
     Job,
     JobButtonReceiver,
     MultiObjectVar,
@@ -135,6 +136,34 @@ def gc_repo_prep(job, data):
     return current_repos
 
 
+def _enqueue_backup_diff_ingest(job, repo_obj):
+    """Hand a freshly pushed backup commit to the backup-diff ingest worker.
+
+    Only the broker publish happens here -- the git read and the per-device path rendering are the
+    worker's job -- so the backup's critical path costs one message. Feature-flagged and fully
+    fault-isolated: it must never break a backup.
+
+    Args:
+        job (Job): The running Job, for its logger.
+        repo_obj (GitRepo): The repo wrapper that was just committed and pushed.
+    """
+    if not constant.ENABLE_BACKUP_DIFF_INDEX:
+        return
+    nautobot_repo = repo_obj.nautobot_repo_obj
+    if "nautobot_golden_config.backupconfigs" not in nautobot_repo.provided_contents:
+        return
+    try:
+        # Imported here so the feature stays inert (no import cost) when disabled.
+        from nautobot_golden_config.tasks import expand_backup_commit  # pylint: disable=import-outside-toplevel
+
+        expand_backup_commit.delay(str(nautobot_repo.pk), repo_obj.head)
+    except Exception:  # pylint: disable=broad-except
+        job.logger.warning(
+            f"{nautobot_repo.name}: backup-diff ingest failed; backup unaffected.",
+            extra={"grouping": "GC Repo Commit and Push"},
+        )
+
+
 def gc_repo_push(job, current_repos, commit_message=""):
     """Push any work from worker to git repos in Job.
 
@@ -173,6 +202,7 @@ def gc_repo_push(job, current_repos, commit_message=""):
                         "object": repo["repo_obj"].nautobot_repo_obj,
                     },
                 )
+                _enqueue_backup_diff_ingest(job, repo["repo_obj"])
 
 
 def gc_repos(func):
@@ -627,6 +657,115 @@ class SyncGoldenConfigWithDynamicGroups(Job):
             GoldenConfig.objects.create(device=device)
 
 
+class SyncBackupVersionTable(Job):
+    """Reconcile the Backup History Diff index against the backup history already in Git."""
+
+    max_commits_per_repo = IntegerVar(
+        default=1000,
+        label="Max Commits Per Repository",
+        description="How deep to walk each backup repository's history.",
+    )
+    dry_run = BooleanVar(
+        default=True,
+        label="Dry Run",
+        description="Report what would be indexed without writing anything.",
+    )
+
+    class Meta:
+        """Meta object boilerplate for syncing backup diff versions."""
+
+        name = "Sync Backup Version Table"
+        description = "Rebuild the backup version table from the history in your backup repositories."
+        has_sensitive_variables = False
+
+    def run(self, max_commits_per_repo=1000, dry_run=True):  # pylint: disable=arguments-differ
+        """Reconcile the index against Git, reporting what was (or would be) written."""
+        # Imported here so the ingest module is only loaded when the job actually runs.
+        from nautobot_golden_config.utilities.backup_diff_ingest import (  # pylint: disable=import-outside-toplevel
+            backfill_index,
+        )
+
+        stats = backfill_index(max_commits_per_repo=max_commits_per_repo, dry_run=dry_run)
+        self.logger.info(f"Walked {stats['commits']} commit(s) across {stats['repositories']} repository(ies).")
+
+        # Both of these mean "recovered less history than you may think", so say so rather than letting a
+        # short backfill look like a complete one.
+        if stats["capped_repositories"]:
+            self.logger.warning(
+                f"Stopped at the {max_commits_per_repo}-commit limit in: {', '.join(stats['capped_repositories'])}. "
+                "Older history was NOT indexed. Re-run with a larger 'Max Commits Per Repository' to go deeper."
+            )
+        if stats["unmapped_paths"]:
+            self.logger.warning(
+                f"{stats['unmapped_paths']} path(s) in Git matched no device currently in backup scope, "
+                f"e.g. {', '.join(stats['unmapped_sample'])}. Non-config files (README, .gitignore) are "
+                "expected here; a large count usually means devices were renamed, a backup path template "
+                "changed, or devices left their Dynamic Group -- that history cannot be re-indexed as-is."
+            )
+
+        if dry_run:
+            self.logger.success(
+                f"Dry run: would index {stats['rows']} device-version row(s). "
+                "Re-run with Dry Run disabled to write them."
+            )
+        else:
+            skipped = stats["rows"] - stats["written"]
+            self.logger.success(
+                f"Indexed {stats['written']} new row(s); {skipped} already present. "
+                "Configurations in Git were only read, never modified."
+            )
+
+
+class CleanUpBackupVersionTable(Job):
+    """Prune Backup History Diff index records past their setting's retention window."""
+
+    dry_run = BooleanVar(
+        default=True,
+        label="Dry Run",
+        description="Report what would be pruned without deleting anything. Leave enabled to preview.",
+    )
+
+    class Meta:
+        """Meta object boilerplate for pruning backup version records."""
+
+        name = "Clean Up Backup Version Table"
+        description = "Remove backup version records that fall outside your retention settings."
+        has_sensitive_variables = False
+
+    def run(self, dry_run=True):  # pylint: disable=arguments-differ
+        """Prune index records per device, honouring the highest-weighted setting for each."""
+        # Imported here so the retention module (and the ORM it touches) is only loaded when the job runs.
+        from nautobot_golden_config.utilities.backup_retention import (  # pylint: disable=import-outside-toplevel
+            prune_backup_versions,
+        )
+
+        results = prune_backup_versions(dry_run=dry_run)
+        verb = "Would prune" if dry_run else "Pruned"
+        for result in results:
+            kept = []
+            if result.retention_days:
+                kept.append(f"within {result.retention_days} days")
+            if result.retention_count:
+                kept.append(f"among the newest {result.retention_count}")
+            self.logger.info(
+                f"{verb} {result.count} backup version record(s): neither {' nor '.join(kept)}.",
+                extra={"object": result.device},
+            )
+
+        total = sum(result.count for result in results)
+        if not total:
+            self.logger.success("Nothing to prune: no records fall outside their retention window.")
+        elif dry_run:
+            self.logger.success(
+                f"Dry run: would prune {total} record(s) across {len(results)} device(s). "
+                "Re-run with Dry Run disabled to apply."
+            )
+        else:
+            self.logger.success(
+                f"Pruned {total} record(s) across {len(results)} device(s). " "Configurations in Git were not modified."
+            )
+
+
 register_jobs(BackupJob)
 register_jobs(IntendedJob)
 register_jobs(ComplianceJob)
@@ -636,3 +775,5 @@ register_jobs(DeployConfigPlanJobButtonReceiver)
 register_jobs(AllGoldenConfig)
 register_jobs(AllDevicesGoldenConfig)
 register_jobs(SyncGoldenConfigWithDynamicGroups)
+register_jobs(SyncBackupVersionTable)
+register_jobs(CleanUpBackupVersionTable)

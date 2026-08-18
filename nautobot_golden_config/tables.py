@@ -557,3 +557,63 @@ class ConfigPlanTable(StatusTableMixin, BaseTable):
             "config_set",
             "status",
         )
+
+
+BACKUP_VERSION_DIFF_LINK = """
+<a href="{% url 'plugins:nautobot_golden_config:backuphistorydiff' %}?device={{ record.device.pk }}"
+   class="btn btn-xs btn-primary">
+    <span class="mdi mdi-file-compare" aria-hidden="true"></span> View Diff
+</a>
+"""
+
+
+class BackupVersionTable(BaseTable):
+    # pylint: disable=R0903
+    """Fleet-wide table of backed-up configuration versions.
+
+    Backs the Backup History Diff landing page, where it is narrowed to one row per device (that device's
+    most recent version) so it reads as a backup inventory. Being a real table rather than hand-written
+    markup is what gives it sortable columns, pagination, column selection, and export.
+    """
+
+    # ``visible=True`` is required here: ToggleColumn defaults to hidden, and Nautobot's generic list
+    # views reveal it themselves when a view offers bulk actions. This table is rendered by a custom
+    # view, so nothing would turn it on and the bulk-delete selection would have no checkboxes.
+    pk = ToggleColumn(visible=True)
+    device = Column(linkify=True, verbose_name="Device")
+    authored_date = Column(verbose_name="Last Backup")
+    short_sha = Column(accessor="commit_sha", verbose_name="Commit", orderable=False)
+    committer = Column(verbose_name="Author")
+    message = Column(verbose_name="Message")
+    actions = TemplateColumn(
+        template_code=BACKUP_VERSION_DIFF_LINK,
+        verbose_name="",
+        orderable=False,
+        attrs={"td": {"class": "text-end"}},
+    )
+
+    def render_short_sha(self, value):
+        """Show the abbreviated commit hash, the form git itself displays."""
+        return format_html("<code>{}</code>", value[:8])
+
+    class Meta(BaseTable.Meta):
+        """Meta attributes."""
+
+        model = models.BackupVersion
+        fields = (
+            "pk",
+            "device",
+            "authored_date",
+            "short_sha",
+            "committer",
+            "message",
+            "actions",
+        )
+        default_columns = (
+            "pk",
+            "device",
+            "authored_date",
+            "short_sha",
+            "message",
+            "actions",
+        )

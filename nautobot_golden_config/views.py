@@ -1,8 +1,11 @@
 """Django views for Nautobot Golden Configuration."""  # pylint: disable=too-many-lines
 
+import ipaddress
 import json
 import logging
+import uuid
 from datetime import datetime
+from urllib.parse import urlencode
 
 import yaml
 from django.contrib import messages
@@ -10,8 +13,9 @@ from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.core.exceptions import ObjectDoesNotExist
 from django.db.models import Count, ExpressionWrapper, FloatField, Max, Q, Sum, Value
 from django.db.models.functions import Coalesce, NullIf
-from django.shortcuts import redirect, render
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils.cache import patch_vary_headers
 from django.utils.html import format_html
 from django.utils.timezone import make_aware
 from django.views.generic import TemplateView, View
@@ -33,7 +37,7 @@ from rest_framework.response import Response
 
 from nautobot_golden_config import details, filters, forms, models, tables
 from nautobot_golden_config.api import serializers
-from nautobot_golden_config.utilities import constant
+from nautobot_golden_config.utilities import backup_diff_read, config_diff, constant
 from nautobot_golden_config.utilities.config_postprocessing import get_config_postprocessing
 from nautobot_golden_config.utilities.graphql import graph_ql_query
 from nautobot_golden_config.utilities.helper import add_message, calculate_aggr_percentage, get_device_to_settings_map
@@ -759,3 +763,341 @@ class GenerateIntendedConfigView(PermissionRequiredMixin, TemplateView):
         context = super().get_context_data(**kwargs)
         context["form"] = forms.GenerateIntendedConfigForm()
         return context
+
+
+def _resolve_device_by_name_or_ip(query, user):
+    """Resolve a device by exact name, else by primary or interface IP address.
+
+    Args:
+        query (str): A device name or an IP address (an optional ``/mask`` is stripped).
+        user: The requesting user; results are scoped with ``restrict(user, "view")``.
+
+    Returns:
+        Device | None: The first matching device the user may view, or ``None``.
+    """
+    if not query:
+        return None
+    query = query.strip()
+    devices = Device.objects.restrict(user, "view")
+    device = devices.filter(name=query).first()
+    if device is not None:
+        return device
+    ip = query.split("/")[0].strip()
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        # Not an IP (e.g. a partial name like "demo"): don't feed it to the IPAM ``__host`` lookups, which
+        # raise ValidationError on non-IP input. The exact-name match above is the only name matching this
+        # helper does -- the device dropdown is what users search names with -- so this is a miss.
+        return None
+    return (
+        devices.filter(primary_ip4__host=ip).first()
+        or devices.filter(primary_ip6__host=ip).first()
+        or devices.filter(interfaces__ip_addresses__host=ip).distinct().first()
+    )
+
+
+def build_backup_diff_context(device, request, extra_params=None):
+    """Build the shared Backup History Diff context for a device (both the device tab and the tool page).
+
+    Picks the two commits to compare (``?a=<older>&b=<newer>``, defaulting to the two most recent) and
+    computes the diff.
+
+    The two dropdowns are rendered as a plain GET form posting back to ``request.path``, so ``history`` and
+    the chosen entries are all the template needs -- ``compare_params`` carries whatever else that page must
+    preserve (``tab`` or ``device``) as hidden inputs. This is what lets the selectors work with JavaScript
+    disabled; the script only auto-submits the form to save a click.
+
+    Args:
+        device (Device): The device whose backup history is shown.
+        request (HttpRequest): The current request (source of the ``a``/``b`` selection and the form target).
+        extra_params (dict | None): Query params this page must preserve (e.g. ``tab`` or ``device``).
+
+    Returns:
+        dict: Template context (history, chosen original/modified, form params, diff rows).
+    """
+    history = backup_diff_read.history(device)
+    by_sha = {entry["sha"]: entry for entry in history}
+
+    # Default the "modified" (newer) side to the latest commit and "original" (older) to the one before.
+    modified = by_sha.get(request.GET.get("b", "")) or (history[0] if history else None)
+    original = by_sha.get(request.GET.get("a", ""))
+    if original is None and modified is not None:
+        idx = history.index(modified)
+        original = history[idx + 1] if idx + 1 < len(history) else None
+    # Always present chronologically: original (left) = older, modified (right) = newer.
+    if original and modified and original["date"] > modified["date"]:
+        original, modified = modified, original
+
+    diff_rows, additions, deletions, diff_too_large = backup_diff_read.backup_diff(device, original, modified)
+
+    return {
+        "device": device,
+        "history": history,
+        "original": original,
+        "modified": modified,
+        # The form posts back to the page it is on; no need to reverse a URL we are already serving.
+        "compare_url": request.path,
+        "compare_params": {key: val for key, val in (extra_params or {}).items() if val},
+        "diff_rows": diff_rows,
+        "additions": additions,
+        "deletions": deletions,
+        "diff_too_large": diff_too_large,
+    }
+
+
+class BackupHistoryDiffView(PermissionRequiredMixin, View):
+    """Per-device "Backup History Diff" tab on the device detail page.
+
+    Git-native side-by-side diff of a device's backup config history: reads the device's backup file
+    straight from the backup Git repository (no config text stored in the database) and diffs any two
+    commits, defaulting to the two most recent. Works for any vendor/format because the diff is a plain
+    line-based text diff.
+    """
+
+    permission_required = ["dcim.view_device", "extras.view_gitrepository"]
+
+    def get(self, request, pk):
+        """Render the Backup History Diff tab for a single device."""
+        device = get_object_or_404(Device.objects.restrict(request.user, "view"), pk=pk)
+        context = build_backup_diff_context(device, request, {"tab": request.GET.get("tab", "")})
+        context.update(
+            {
+                "object": device,
+                "active_tab": request.GET.get("tab"),
+                "object_detail_content": DeviceUIViewSet.object_detail_content,
+                "verbose_name": "Device",
+            }
+        )
+        return _render_backup_diff(request, "nautobot_golden_config/backuphistorydiff_devicetab.html", context)
+
+
+def _render_backup_diff(request, template, context):
+    """Render a Backup History Diff page with ``Vary: HX-Request`` set.
+
+    These pages extend Nautobot's base template, which renders less markup for an HTMX request than for a
+    full navigation. Without advertising that the response varies on ``HX-Request``, a cache keyed only on
+    cookies can hand a browser the partial it stored for an HTMX swap when the user presses Back -- the
+    familiar "back button shows a fragment" failure. Nautobot core does the same thing in its own views
+    (``core.views.generic`` and ``extras.views``); there is no middleware doing it globally, so any view
+    rendering the shared chrome has to set it.
+    """
+    response = render(request, template, context)
+    patch_vary_headers(response, ["HX-Request"])
+    return response
+
+
+def _backup_fleet_context(request):
+    """Build the fleet-wide backup inventory shown on the Backup History Diff landing page.
+
+    One row per device -- that device's most recent backup -- filterable by device name and by when it was
+    last backed up, sorted and paginated in the database.
+
+    This needs a queryset, which only exists when the backup-diff index is populated. With the index off
+    (the default), there is nothing to filter in SQL, so the page falls back to the git-native list and
+    says so rather than silently offering controls that would do nothing.
+
+    Args:
+        request (HttpRequest): The current request; supplies the filter params and the user.
+
+    Returns:
+        dict: ``{"table": ...}`` plus the filter form when index-backed, else ``{"recent_changes": [...]}``.
+    """
+    if not constant.ENABLE_BACKUP_DIFF_INDEX:
+        # The git-native list walks every in-scope device, so its cost is linear in fleet size. Past the
+        # ceiling, refuse rather than hand the operator a ten-second page; the per-device diff itself is
+        # unaffected and stays fast, so only this fleet list is withheld.
+        fleet_size = config_diff.backup_scope_device_count()
+        if fleet_size > constant.BACKUP_DIFF_MAX_FALLBACK_FLEET:
+            return {
+                "recent_changes": [],
+                "index_disabled": True,
+                "fleet_too_large": fleet_size,
+                "fallback_limit": constant.BACKUP_DIFF_MAX_FALLBACK_FLEET,
+            }
+        return {
+            "recent_changes": backup_diff_read.recent_changes(request.user),
+            "index_disabled": True,
+        }
+
+    queryset = models.BackupVersion.objects.for_devices_viewable_by(request.user).latest_per_device()
+    queryset = filters.BackupVersionFilterSet(request.GET, queryset).qs.select_related("device", "repository")
+    table = tables.BackupVersionTable(queryset, user=request.user)
+    RequestConfig(
+        request,
+        {"paginator_class": views.EnhancedPaginator, "per_page": views.get_paginate_count(request)},
+    ).configure(table)
+    return {
+        "table": table,
+        "index_disabled": False,
+    }
+
+
+class BackupVersionBulkDeleteView(PermissionRequiredMixin, View):
+    """Two-step bulk delete of backup *index* records: pick devices, then pick which versions to drop.
+
+    Step 1 posts the device rows selected on the fleet table; this view expands them into every
+    ``BackupVersion`` those devices have and renders them for selection. Step 2 posts the chosen version
+    PKs and deletes them.
+
+    Two invariants, both enforced server-side rather than only in the template:
+
+    * A device's most recent version is never deletable. It is what the diff and history views default to,
+      so dropping it would blank the feature for that device.
+    * Only index records are removed. The configurations themselves live in the backup Git repository and
+      are never touched, so a delete here is recoverable by re-indexing -- it is not data loss.
+    """
+
+    permission_required = ["dcim.view_device", "nautobot_golden_config.delete_backupversion"]
+
+    @staticmethod
+    def _uuids(values):
+        """Return only the values that parse as UUIDs.
+
+        Every pk here arrives from a form field, and a UUID column rejects a non-UUID by raising
+        ``ValidationError`` -- which would surface as a 500 rather than a message. Filtering first means a
+        malformed or hand-crafted submission is treated as "selected nothing", not as a server error.
+        """
+        valid = []
+        for value in values:
+            try:
+                valid.append(uuid.UUID(str(value)))
+            except (AttributeError, TypeError, ValueError):
+                continue
+        return valid
+
+    def _versions_for(self, request, device_pks):
+        """Return (versions, latest_pks) for the given devices, scoped to what the user may view."""
+        versions = (
+            models.BackupVersion.objects.for_devices_viewable_by(request.user)
+            .filter(device__in=device_pks)
+            .select_related("device")
+            .order_by("device__name", "-authored_date", "-commit_sha")
+        )
+        latest_pks = set(
+            models.BackupVersion.objects.for_devices_viewable_by(request.user)
+            .filter(device__in=device_pks)
+            .latest_per_device()
+            .values_list("pk", flat=True)
+        )
+        return versions, latest_pks
+
+    def get(self, request):
+        """Render the paginated confirmation page for the devices named in ``?device=``.
+
+        A GET rather than a rendered POST response so the page paginates like any other list: Nautobot's
+        paginator include carries the existing query string forward, so ``?device=...&page=2`` just works
+        and the page is reloadable and shareable. Without pagination this view rendered every version of
+        every selected device in one response -- and versions accumulating is the exact reason retention
+        exists, so "50 devices x thousands of versions" is a reachable page, not a hypothetical one.
+        """
+        redirect_url = reverse("plugins:nautobot_golden_config:backuphistorydiff")
+        device_pks = self._uuids(request.GET.getlist("device"))
+        if not device_pks:
+            messages.warning(request, "Select at least one device before choosing versions to delete.")
+            return redirect(redirect_url)
+
+        versions, latest_pks = self._versions_for(request, device_pks)
+        paginator = views.EnhancedPaginator(versions, views.get_paginate_count(request))
+        page = paginator.get_page(request.GET.get("page"))
+        return _render_backup_diff(
+            request,
+            "nautobot_golden_config/backupversion_bulk_delete.html",
+            {
+                "versions": page.object_list,
+                "paginator": paginator,
+                "page": page,
+                "latest_pks": latest_pks,
+                "device_count": len(device_pks),
+                "total_versions": paginator.count,
+                "return_url": redirect_url,
+            },
+        )
+
+    def post(self, request):
+        """Expand selected devices into their versions, or delete the versions that were selected."""
+        redirect_url = reverse("plugins:nautobot_golden_config:backuphistorydiff")
+
+        if request.POST.get("confirm"):
+            selected = self._uuids(request.POST.getlist("version_pk"))
+            if not selected:
+                messages.warning(request, "No backup versions were selected, so nothing was deleted.")
+                return redirect(redirect_url)
+            candidates = models.BackupVersion.objects.for_devices_viewable_by(request.user).filter(pk__in=selected)
+            device_pks = list(candidates.values_list("device_id", flat=True).distinct())
+            _, latest_pks = self._versions_for(request, device_pks)
+            # Re-derive the protected set here rather than trusting the form: a crafted POST could
+            # otherwise include a latest-version PK that the template rendered as disabled.
+            deletable = [version for version in candidates if version.pk not in latest_pks]
+            protected = len(selected) - len(deletable)
+            if deletable:
+                models.BackupVersion.objects.filter(pk__in=[version.pk for version in deletable]).delete()
+                messages.success(
+                    request,
+                    f"Deleted {len(deletable)} backup version record(s). The configurations remain in Git.",
+                )
+            if protected:
+                messages.warning(
+                    request,
+                    f"Kept {protected} most-recent version(s): a device's latest backup cannot be deleted.",
+                )
+            return redirect(redirect_url)
+
+        selected_rows = self._uuids(request.POST.getlist("pk"))
+        if not selected_rows:
+            messages.warning(request, "Select at least one device before choosing versions to delete.")
+            return redirect(redirect_url)
+
+        # The fleet table posts one row per device, so the selected PKs are BackupVersion rows; resolve
+        # them to the devices they belong to.
+        device_pks = list(
+            models.BackupVersion.objects.for_devices_viewable_by(request.user)
+            .filter(pk__in=selected_rows)
+            .values_list("device_id", flat=True)
+            .distinct()
+        )
+        if not device_pks:
+            messages.warning(request, "Select at least one device before choosing versions to delete.")
+            return redirect(redirect_url)
+
+        # Redirect rather than render, so the confirmation page is a plain GET that can paginate, reload,
+        # and be shared. POST-redirect-GET also keeps a browser refresh from re-submitting the selection.
+        confirm_url = reverse("plugins:nautobot_golden_config:backupversion_bulk_delete")
+        query = urlencode([("device", str(device_pk)) for device_pk in device_pks])
+        return redirect(f"{confirm_url}?{query}")
+
+
+class BackupHistoryDiffToolView(PermissionRequiredMixin, View):
+    """Standalone Golden Config "Diffs" tool: pick a device (name search) or an IP and diff its backup history."""
+
+    permission_required = ["dcim.view_device", "extras.view_gitrepository"]
+
+    def get(self, request):
+        """Render one device's backup diff (via the device picker or an IP), or the recent-changes landing."""
+        form = forms.BackupHistoryDiffForm(request.GET)
+        submitted = bool(request.GET.get("device") or request.GET.get("ip"))
+        context = {"form": form, "device": None, "submitted": submitted}
+
+        device = None
+        if form.is_valid():
+            device = form.cleaned_data.get("device")
+            ip_query = (form.cleaned_data.get("ip") or "").strip()
+            if device is None and ip_query:
+                device = _resolve_device_by_name_or_ip(ip_query, request.user)
+                if device is None:
+                    # The lookup takes an exact device name or an IP, so name the accepted forms rather
+                    # than assuming the user typed an IP.
+                    messages.warning(
+                        request,
+                        f"No device found matching '{ip_query}'. Enter an exact device name or an IP address.",
+                    )
+        elif submitted:
+            # An invalid form (e.g. ?device=<not-a-uuid>) would otherwise resolve no device and render a
+            # bare "Back" button with no explanation. Say what went wrong; the template lists the errors.
+            messages.warning(request, "That device lookup could not be processed; see the details below.")
+
+        if device is not None:
+            context.update(build_backup_diff_context(device, request, {"device": str(device.pk)}))
+        elif not submitted:
+            context.update(_backup_fleet_context(request))
+        return _render_backup_diff(request, "nautobot_golden_config/backuphistorydiff.html", context)

@@ -1,0 +1,1 @@
+Added an optional S3/MinIO content store and a metadata index for Backup History Diff, so backup configurations can be compared on nodes that do not hold a full clone of the backup Git repository. Both are disabled by default and the feature falls back to reading Git directly.

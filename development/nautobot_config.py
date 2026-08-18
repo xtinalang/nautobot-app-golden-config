@@ -147,6 +147,11 @@ PLUGINS_CONFIG = {
         "enable_postprocessing": is_truthy(os.environ.get("ENABLE_POSTPROCESSING", True)),
         "enable_plan": is_truthy(os.environ.get("ENABLE_PLAN", True)),
         "enable_deploy": is_truthy(os.environ.get("ENABLE_DEPLOY", True)),
+        # Off by default, matching the app default: the Backup History Diff view works without it.
+        # Set ENABLE_BACKUP_DIFF_INDEX=True to develop against the indexed path (fleet device list,
+        # filtering, retention).
+        "enable_backup_diff_index": is_truthy(os.environ.get("ENABLE_BACKUP_DIFF_INDEX", False)),
+        "backup_diff_max_fallback_fleet": int(os.environ.get("BACKUP_DIFF_MAX_FALLBACK_FLEET", 5000)),
         "sot_agg_transposer": os.environ.get("SOT_AGG_TRANSPOSER"),
         "postprocessing_callables": os.environ.get("POSTPROCESSING_CALLABLES", []),
         "postprocessing_subscribed": os.environ.get("POSTPROCESSING_SUBSCRIBED", []),

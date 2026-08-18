@@ -1,10 +1,10 @@
 """Added content to the device model view for config compliance."""
 
 from django.db.models import Count, Q
-from nautobot.apps.ui import DistinctViewTab, TemplateExtension
+from nautobot.apps.ui import Button, ButtonColorChoices, DistinctViewTab, TemplateExtension
 
 from nautobot_golden_config.models import ConfigCompliance, GoldenConfig
-from nautobot_golden_config.utilities.constant import CONFIG_FEATURES, ENABLE_COMPLIANCE
+from nautobot_golden_config.utilities.constant import CONFIG_FEATURES, ENABLE_BACKUP, ENABLE_COMPLIANCE
 
 
 class ConfigComplianceDeviceCheck(TemplateExtension):  # pylint: disable=abstract-method
@@ -136,11 +136,37 @@ class ConfigComplianceTenantCheck(TemplateExtension):  # pylint: disable=abstrac
         )
 
 
+class BackupHistoryDiffDeviceButton(TemplateExtension):  # pylint: disable=abstract-method
+    """Adds a "Backup History Diff" button to the device detail page (top-right action buttons).
+
+    A button rather than a tab: the diff is a distinct git-backed page, not inline device data, so it reads
+    as an action ("go compare this device's backups") instead of another tab of detail content. The button
+    links to the same ``backuphistorydiff_devicetab`` view (``Button`` reverses ``link_name`` with the
+    device pk automatically).
+    """
+
+    model = "dcim.device"
+
+    object_detail_buttons = [
+        Button(
+            weight=100,
+            label="Backup History Diff",
+            icon="mdi-file-compare",
+            color=ButtonColorChoices.DEFAULT,
+            link_name="plugins:nautobot_golden_config:backuphistorydiff_devicetab",
+            # Render disabled (not hidden) for users lacking access, per NTC UI rules; the view enforces it too.
+            required_permissions=["dcim.view_device", "extras.view_gitrepository"],
+        )
+    ]
+
+
 extensions = [ConfigDeviceDetails]
 if ENABLE_COMPLIANCE:
     extensions.append(ConfigComplianceDeviceCheck)
     extensions.append(ConfigComplianceLocationCheck)
     extensions.append(ConfigComplianceTenantCheck)
+if ENABLE_BACKUP:
+    extensions.append(BackupHistoryDiffDeviceButton)
 
 
 template_extensions = extensions

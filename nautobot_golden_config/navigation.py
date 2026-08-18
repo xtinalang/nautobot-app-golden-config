@@ -146,25 +146,40 @@ items_setup.append(
 )
 
 
+items_tools = [
+    NavMenuItem(
+        link="plugins:nautobot_golden_config:generate_intended_config",
+        name="Generate Intended Config",
+        permissions=["dcim.view_device", "extras.view_gitrepository"],
+    ),
+]
+
+# "Diffs" group: git-native config diff tools. Sits below "Tools" (higher weight).
+items_diffs = []
+if ENABLE_BACKUP:
+    items_diffs.append(
+        NavMenuItem(
+            link="plugins:nautobot_golden_config:backuphistorydiff",
+            name="Backup History Diff",
+            permissions=["dcim.view_device", "extras.view_gitrepository"],
+        )
+    )
+
+groups = [
+    NavMenuGroup(name="Manage", weight=100, items=tuple(items_operate)),
+    NavMenuGroup(name="Setup", weight=100, items=tuple(items_setup)),
+    NavMenuGroup(name="Tools", weight=300, items=tuple(items_tools)),
+]
+# Only add the "Diffs" group when it actually has items (it is empty when ENABLE_BACKUP is False).
+if items_diffs:
+    groups.append(NavMenuGroup(name="Diffs", weight=400, items=tuple(items_diffs)))
+
+
 menu_items = (
     NavMenuTab(
         name="Golden Config",
         weight=NavigationWeightChoices.GOLDEN_CONFIG,
         icon=NavigationIconChoices.GOLDEN_CONFIG,
-        groups=(
-            NavMenuGroup(name="Manage", weight=100, items=tuple(items_operate)),
-            NavMenuGroup(name="Setup", weight=100, items=tuple(items_setup)),
-            NavMenuGroup(
-                name="Tools",
-                weight=300,
-                items=(
-                    NavMenuItem(
-                        link="plugins:nautobot_golden_config:generate_intended_config",
-                        name="Generate Intended Config",
-                        permissions=["dcim.view_device", "extras.view_gitrepository"],
-                    ),
-                ),
-            ),
-        ),
+        groups=tuple(groups),
     ),
 )

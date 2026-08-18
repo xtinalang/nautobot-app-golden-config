@@ -1,0 +1,121 @@
+{% comment %}
+Shared Backup History Diff body: two commit selectors + a GitHub-style side-by-side diff, rendered
+entirely server-side. Included by both the device tab and the standalone "Diffs" tool page.
+
+Styles live in static/nautobot_golden_config/backup_history_diff.css and the selector script in
+backup_history_diff.js; both are loaded by the including template, so this partial emits markup only
+(and can safely be included more than once on a page).
+
+Context:
+  device                       -- the Device being diffed
+  history                      -- list of commit dicts (newest first); empty => no backups yet
+  original/modified            -- chosen commit dicts (older/newer), or None; their ``sha`` marks the
+                                  selected <option> in each dropdown
+  compare_url                  -- where the selector form GETs back to
+  compare_params               -- extra query params that page must preserve, as hidden inputs
+  diff_rows, additions, deletions, diff_too_large -- the computed diff
+{% endcomment %}
+<div class="gcd-scope">
+  {% if not history %}
+    <div class="alert alert-info">
+      No backup history found for <strong>{{ device }}</strong>. This device has no committed backup configs in
+      its backup Git repository yet (or the repository is not available on this node).
+    </div>
+  {% else %}
+    <form method="get" action="{{ compare_url }}" id="gcd-compare-form">
+      {% for key, value in compare_params.items %}
+        <input type="hidden" name="{{ key }}" value="{{ value }}">
+      {% endfor %}
+      {# Both selectors are col-md-6 so the split matches the cards and the diff columns below exactly. #}
+      <div class="row gcd-selectors">
+        <div class="col-md-6">
+          <label for="gcd-original">Original (older):</label>
+          <select id="gcd-original" name="a" class="form-control">
+            {% for entry in history %}
+              <option value="{{ entry.sha }}"{% if entry.sha == original.sha %} selected{% endif %}>
+                {{ entry.date }} &mdash; {{ entry.short_sha }} &mdash; {{ entry.author|default:"unknown" }}
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-6">
+          <label for="gcd-modified">Modified (newer):</label>
+          <select id="gcd-modified" name="b" class="form-control">
+            {% for entry in history %}
+              <option value="{{ entry.sha }}"{% if entry.sha == modified.sha %} selected{% endif %}>
+                {{ entry.date }} &mdash; {{ entry.short_sha }} &mdash; {{ entry.author|default:"unknown" }}
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+      {# Fallback for JavaScript-disabled browsers; the script submits on change. Kept out of the grid #}
+      {# above so it does not narrow the right-hand selector and break the 50/50 alignment. #}
+      <div class="gcd-compare-actions">
+        <button type="submit" id="gcd-compare-submit" class="btn btn-primary gcd-compare-submit">Compare</button>
+      </div>
+    </form>
+
+    {% if not original %}
+      <div class="alert alert-info">
+        This is the only backup commit for <strong>{{ device }}</strong> &mdash; there is no earlier version to
+        diff against yet.
+      </div>
+    {% else %}
+      {# Same col-md-6 grid as the selectors above, so each card sits directly over its own diff column. #}
+      {# No arrow between them: it consumed layout width and pushed the Modified card right of its column. #}
+      <div class="row gcd-cards">
+        <div class="col-md-6">
+          <div class="gcd-card original">
+            <div class="gcd-tag">Original &mdash; older</div>
+            <div class="gcd-meta">{{ original.date }} &middot; {{ original.author|default:"unknown" }}</div>
+            <div class="gcd-hash">{{ original.short_sha }}</div>
+            {% if original.message %}<div class="gcd-meta">{{ original.message }}</div>{% endif %}
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="gcd-card modified">
+            <div class="gcd-tag">Modified &mdash; newer</div>
+            <div class="gcd-meta">{{ modified.date }} &middot; {{ modified.author|default:"unknown" }}</div>
+            <div class="gcd-hash">{{ modified.short_sha }}</div>
+            {% if modified.message %}<div class="gcd-meta">{{ modified.message }}</div>{% endif %}
+          </div>
+        </div>
+      </div>
+
+      <div class="gcd-diff">
+        <div class="gcd-diff-header">
+          backup config
+          <span class="gcd-add-count">+{{ additions }}</span><span class="gcd-del-count">&minus;{{ deletions }}</span>
+        </div>
+        <div class="gcd-scroll">
+          <table class="gcd-table">
+            {# Explicit column widths (with table-layout: fixed) put the divide at exactly 50%, so each #}
+            {# half lines up with the card and selector above it instead of tracking content width. #}
+            <colgroup>
+              <col class="gcd-col-num">
+              <col class="gcd-col-text">
+              <col class="gcd-col-num">
+              <col class="gcd-col-text">
+            </colgroup>
+            <tbody>
+              {% for row in diff_rows %}
+                <tr>
+                  <td class="gcd-num">{{ row.left_no|default_if_none:"" }}</td>
+                  <td class="{{ row.left_class }}">{{ row.left_text|default_if_none:"" }}</td>
+                  <td class="gcd-num">{{ row.right_no|default_if_none:"" }}</td>
+                  <td class="{{ row.right_class }}">{{ row.right_text|default_if_none:"" }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% if diff_too_large %}
+          <div class="gcd-empty-msg">These configs are too large to diff inline. Open each commit in the backup repository to view the full config.</div>
+        {% elif not diff_rows %}
+          <div class="gcd-empty-msg">No differences &mdash; these two backups are identical.</div>
+        {% endif %}
+      </div>
+    {% endif %}
+  {% endif %}
+</div>

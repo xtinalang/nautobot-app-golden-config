@@ -685,3 +685,23 @@ class GenerateIntendedConfigForm(django_forms.Form):
         super().__init__(*args, **kwargs)
         if version.parse(settings.VERSION) < version.parse("2.4.2"):
             self.fields["git_repository_branch"].widget = django_forms.HiddenInput
+
+
+class BackupHistoryDiffForm(django_forms.Form):
+    """Device selector for the standalone Backup History Diff tool.
+
+    Pick a device from the name-searchable dropdown, or paste an IP address to look one up. Both fields are
+    optional: with neither, the tool shows its recent-changes landing.
+    """
+
+    device = forms.DynamicModelChoiceField(
+        queryset=Device.objects.all(),
+        required=False,
+        label="Device",
+        help_text="Search by name and select a device to diff its backup history.",
+    )
+    ip = django_forms.CharField(
+        required=False,
+        label="…or IP address",
+        help_text="Alternatively, look up a device by its primary or interface IP address.",
+    )

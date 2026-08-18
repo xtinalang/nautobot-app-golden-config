@@ -11,7 +11,7 @@ from django.db.models.manager import BaseManager
 from django.utils.module_loading import import_string
 from hier_config import WorkflowRemediation, get_hconfig
 from hier_config.utils import hconfig_v2_os_v3_platform_mapper, load_hconfig_v2_options
-from nautobot.apps.models import RestrictedQuerySet, extras_features
+from nautobot.apps.models import BaseModel, RestrictedQuerySet, extras_features
 from nautobot.apps.utils import render_jinja2
 from nautobot.core.models.generics import PrimaryModel
 from nautobot.core.models.utils import serialize_object, serialize_object_v2
@@ -609,6 +609,33 @@ class GoldenConfigSetting(PrimaryModel):  # pylint: disable=too-many-ancestors
         verbose_name="Backup Test",
         help_text="Whether or not to pretest the connectivity of the device by verifying there is a resolvable IP that can connect to port 22.",
     )
+    backup_retention_days = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name="Backup Version Retention (days)",
+        help_text=(
+            "How many days of backup version history to keep in the Backup History Diff index for devices in "
+            "this setting's scope. Leave blank to keep everything (the default). Pruning removes only index "
+            "records -- the configurations themselves stay in the backup Git repository, untouched -- and a "
+            "device's most recent version is never pruned. Enforced by the 'Clean Up Backup Version Table' job. "
+            "Pruned records can usually be rebuilt with the 'Sync Backup Version Table' job, but only "
+            "as far back as its commit limit reaches and only while a device's backup path still renders "
+            "the same, so treat pruning as a one-way trim rather than a reversible one."
+        ),
+    )
+    backup_retention_count = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name="Backup Version Retention (minimum count per device)",
+        help_text=(
+            "The fewest backup versions to keep per device in the Backup History Diff index, regardless of "
+            "age. Leave blank to apply only the day-based window. The two rules are combined in the device's "
+            "favour: a version is kept if it falls within the retention window OR is among this many most "
+            "recent, so setting 30 days and 10 keeps a month of history and never fewer than the last 10 -- "
+            "even for a device that has not changed in years. Only index records are removed; the "
+            "configurations themselves stay in the backup Git repository."
+        ),
+    )
     sot_agg_query = models.ForeignKey(
         to="extras.GraphQLQuery",
         on_delete=models.PROTECT,
@@ -630,6 +657,8 @@ class GoldenConfigSetting(PrimaryModel):  # pylint: disable=too-many-ancestors
         "weight",
         "backup_path_template",
         "backup_test_connectivity",
+        "backup_retention_days",
+        "backup_retention_count",
         "intended_path_template",
         "jinja_path_template",
         "sot_agg_query",
@@ -885,3 +914,78 @@ class ConfigPlan(PrimaryModel):  # pylint: disable=too-many-ancestors
     def __str__(self):
         """Return a simple string if model is called."""
         return f"{self.device.name}-{self.plan_type}-{self.created}"
+
+
+class BackupVersionQuerySet(RestrictedQuerySet):
+    """Queries for the backup-diff metadata index (the 'card catalog')."""
+
+    def for_device(self, device):
+        """Return this device's index rows, newest first (the shared history ordering)."""
+        return self.filter(device=device).order_by("-authored_date", "-commit_sha")
+
+    def latest_per_device(self):
+        """Narrow to one row per device: that device's most recent version.
+
+        Uses a correlated subquery rather than PostgreSQL-only ``DISTINCT ON`` so it works on MySQL too,
+        and stays a queryset -- which is what lets the fleet view filter, sort, and paginate it in the
+        database instead of in Python.
+        """
+        latest = (
+            self.model.objects.filter(device_id=models.OuterRef("device_id"))
+            .order_by("-authored_date", "-commit_sha")
+            .values("pk")[:1]
+        )
+        return self.filter(pk=models.Subquery(latest))
+
+    def for_devices_viewable_by(self, user):
+        """Scope to versions of devices the user may view.
+
+        Scoped by *device* rather than ``restrict()`` on this model: ``view_backupversion`` is a
+        permission no operator would grant on an internal index, so scoping on it would return nothing
+        for every non-superuser.
+        """
+        return self.filter(device__in=Device.objects.restrict(user, "view"))
+
+
+class BackupVersion(BaseModel):
+    """Metadata index of one backup commit per device -- the 'card catalog' for Backup History Diff.
+
+    Stores only FACTS about a backed-up config version (which device, which commit, when, by whom) --
+    never the config text itself, which stays in git (and, later, a content store). Written by the
+    backup-time ingest hook; read by the history/recent-changes views so they never have to walk git.
+    """
+
+    natural_key_field_names = ["id"]
+
+    # CASCADE (not PROTECT): this table is a rebuildable *cache/index of git*, not the source of truth
+    # (git is). Deleting a device should drop its index rows, not be blocked by them.
+    device = models.ForeignKey(to="dcim.Device", on_delete=models.CASCADE, related_name="backup_versions")
+    repository = models.ForeignKey(to="extras.GitRepository", on_delete=models.CASCADE, related_name="backup_versions")
+    commit_sha = models.CharField(max_length=40)
+    blob_sha = models.CharField(max_length=40)
+    path = models.CharField(max_length=255)
+    authored_date = models.DateTimeField()
+    committer = models.CharField(max_length=255, blank=True)
+    message = models.CharField(max_length=255, blank=True)
+
+    objects = BaseManager.from_queryset(BackupVersionQuerySet)()
+
+    class Meta:
+        """Metadata for the BackupVersion model."""
+
+        ordering = ["-authored_date"]
+        verbose_name = "Backup Version"
+        verbose_name_plural = "Backup Versions"
+        # Idempotency guarantee: one card per (device, commit) -- replays/reruns can't duplicate.
+        # ``unique_together`` rather than a UniqueConstraint, matching every other model in this app
+        # and Nautobot's MySQL-compatibility convention.
+        unique_together = ("device", "commit_sha")
+        indexes = [
+            # Hot reads: this device newest-first (history), and whole-fleet newest-first (recent list).
+            models.Index(fields=["device", "-authored_date"], name="gc_bv_device_date_idx"),
+            models.Index(fields=["-authored_date"], name="gc_bv_date_idx"),
+        ]
+
+    def __str__(self):
+        """Human-readable representation: 'device @ short-sha'."""
+        return f"{self.device} @ {self.commit_sha[:8]}"

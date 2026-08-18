@@ -64,6 +64,16 @@ PLUGINS_CONFIG = {
         "sot_agg_transposer": None,
         "postprocessing_callables": [],
         "postprocessing_subscribed": [],
+        # Backup History Diff -- the diff view itself needs no configuration. These settings only control
+        # the optional metadata index and object-store backend; see "Backup History Diff" below.
+        "enable_backup_diff_index": False,
+        "backup_diff_max_fallback_fleet": 5000,
+        "backup_diff_content_store": "git",
+        # "backup_diff_s3_bucket": "",
+        # "backup_diff_s3_prefix": "",
+        # "backup_diff_s3_endpoint_url": "",
+        # "backup_diff_s3_region": "",
+        # "backup_diff_s3_sse": "",
         "jinja_env": {
             "undefined": "jinja2.StrictUndefined",
             "trim_blocks": True,
@@ -115,6 +125,48 @@ The app behavior can be controlled with the following list of settings:
 | per_feature_width         | 13                            | 13      | The width in inches that the overview table can be.                                                                                                                        |
 | per_feature_height        | 4                             | 4       | The height in inches that the overview table can be.                                                                                                                       |
 | jinja_env | {"lstrip_blocks": False} | See Note Below | A dictionary of Jinja2 Environment options compatible with Jinja2.SandboxEnvironment() |
+| enable_backup_diff_index  | False                         | False   | A boolean to represent whether or not to index backup commits in the database as they are pushed. See [Backup History Diff](#backup-history-diff).                          |
+| backup_diff_max_fallback_fleet | 5000                     | 5000    | The device count above which the Backup History Diff landing page stops building its device list from Git. Only applies when `enable_backup_diff_index` is `False`.          |
+| backup_diff_content_store | "git"                         | "git"   | Where Backup History Diff reads configuration text from, either `"git"` or `"s3"`.                                                                                          |
+| backup_diff_s3_bucket     | "gc-backup-configs"           | ""      | The bucket holding backup configurations when `backup_diff_content_store` is `"s3"`. An empty bucket makes the S3 backend fall back to Git.                                |
+| backup_diff_s3_prefix     | "gc-backup-diff/"             | ""      | A key prefix applied to objects in that bucket.                                                                                                                             |
+| backup_diff_s3_endpoint_url | "https://minio.example.com" | ""      | The endpoint for MinIO or another S3-compatible store. Leave unset for AWS S3.                                                                                              |
+| backup_diff_s3_region     | "us-east-1"                   | ""      | The AWS region for the bucket.                                                                                                                                              |
+| backup_diff_s3_sse        | "AES256"                      | ""      | The server-side encryption to request on upload, for example `AES256` or `aws:kms`.                                                                                          |
+
+### Backup History Diff
+
+The Backup History Diff view reads a device's backup configurations straight out of the backup Git
+repository and needs no configuration. The settings above are only for deployments that want more than
+that:
+
+- `enable_backup_diff_index` records each backup commit in the database as it is pushed, so the history
+  and "recently changed" lists are answered by a database query instead of by walking Git. It also
+  pre-computes each device's latest diff, so the comparison is ready before the page is opened. Indexing
+  runs on a Celery worker and never blocks a backup job. Leaving it `False` keeps the feature working;
+  reads simply fall back to Git. The setting governs reading as well as writing, so turning it back off
+  makes the views ignore any rows already indexed rather than serving an index that is no longer maintained.
+  The index also backs the filterable device list and its retention controls, so both require this setting.
+  It matters most on large fleets: building the device list from Git means walking every in-scope device,
+  which measures roughly a second at 10,000 devices and ten seconds at 100,000. Above
+  `backup_diff_max_fallback_fleet` (default 5000) the landing page stops building that list and says so
+  rather than spending the time; looking up a single device, and the diff itself, are never affected.
+  Index growth is bounded per scope by the **Backup Version Retention (days)** and **Backup Version
+  Retention (minimum count per device)** fields on a Golden Config Setting, enforced by the **Prune Backup
+  Versions** job. A version is kept if it is within the day window OR among the most recent N, so 30 days
+  and 10 keeps a month of history and never fewer than the last 10. Pruning removes index records only and
+  never modifies the backup Git repository. See
+  [Backup History Diff](../user/app_feature_backup_diff.md#retention).
+- `backup_diff_content_store` set to `"s3"` stores each configuration version in an object store keyed by
+  its content hash. This is for multi-node deployments where the web node serving a request may not hold a
+  clone of the backup repository. It requires the optional `s3` extra (`pip install nautobot-golden-config[s3]`),
+  and AWS credentials come from the standard AWS credential chain, never from this configuration. Any S3
+  misconfiguration or error falls back to reading Git, so enabling it cannot make a diff less available.
+
+!!! note
+    Backup configurations contain live secrets and password hashes. The Backup History Diff views require
+    `dcim.view_device` and `extras.view_gitrepository`, the same permissions as the Generate Intended
+    Config view. See the [FAQ entry on storing backup configurations in Git](../user/faq.md).
 
 !!! note
     `platform_slug_map` configuration was removed as of the `v2.0.0` release of Golden Config, for more information please review the [v2 Migration Guide](./migrating_to_v2.md)

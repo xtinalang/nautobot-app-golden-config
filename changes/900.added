@@ -1,0 +1,1 @@
+Added a Backup History Diff feature that renders a side-by-side diff of any two of a device's backup configurations, reachable from a button on the device detail page and from a new "Diffs" group in the Golden Config navigation menu.

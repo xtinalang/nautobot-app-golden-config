@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% load form_helpers %}
+{% load helpers %}
+{% load static %}
+
+{% block title %}Backup History Diff{% endblock title %}
+
+{% block extra_styles %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'nautobot_golden_config/backup_history_diff.css' %}">
+{% endblock extra_styles %}
+
+{% block content %}
+  <div class="row">
+    <div class="col-md-12">
+      {% if device %}
+        {# ?device=<pk>: clean device-focused view -- NO search; back button, device header, then the diff. #}
+        <div class="text-end gcd-back">
+          <a href="{% url 'plugins:nautobot_golden_config:backuphistorydiff' %}" class="btn btn-default">
+            <span class="mdi mdi-arrow-left" aria-hidden="true"></span> Back to Backup History Diff
+          </a>
+        </div>
+        <h2 class="gcd-title">Backup History Diff &mdash; {{ device }}</h2>
+        <p class="gcd-subtle">
+          Side-by-side diff of this device's backup configuration history, read directly from the backup Git
+          repository. Always shown oldest &rarr; newest.
+        </p>
+        {% include "nautobot_golden_config/inc/backup_history_diff_body.html" %}
+      {% else %}
+        {# Picker: the search form is shared by the landing view and the "nothing matched" retry. #}
+        <h1>Backup History Diff</h1>
+        {% if submitted %}
+          {% if form.errors %}
+            <div class="alert alert-danger">
+              <strong>That lookup could not be processed:</strong>
+              <ul>
+                {% for field, field_errors in form.errors.items %}
+                  {% for error in field_errors %}
+                    <li>{{ field }}: {{ error }}</li>
+                  {% endfor %}
+                {% endfor %}
+              </ul>
+            </div>
+          {% else %}
+            <div class="alert alert-warning">
+              No device matched what you entered. Pick a device from the dropdown, or enter an exact device
+              name or an IP address.
+            </div>
+          {% endif %}
+        {% else %}
+          <p class="text-muted">
+            Git-native side-by-side diff of a device's backup configuration history. Look up a device by name
+            or IP address, then compare any two backups. Works for any vendor/format (Cisco, Arista, Juniper,
+            FortiOS, YAML, &hellip;) because the diff is a plain line-based text diff.
+          </p>
+        {% endif %}
+        <form method="get" class="gcd-picker-form">
+          {% for field in form.visible_fields %}
+            {% render_field field %}
+          {% endfor %}
+          <button type="submit" class="btn btn-primary">Show Diff</button>
+        </form>
+        {% if not submitted %}
+          <hr>
+          <h4>Backed-Up Devices</h4>
+          {% if index_disabled %}
+            {# No index => no queryset => nothing to filter or paginate in SQL. Say so instead of #}
+            {# rendering controls that cannot work. #}
+            {% if fleet_too_large %}
+              <div class="alert alert-warning">
+                <strong>Device list not shown.</strong> Reading this list from Git means walking all
+                {{ fleet_too_large }} devices in backup scope, which is too slow to do on a page load
+                (the limit is {{ fallback_limit }}). Enable the <code>enable_backup_diff_index</code>
+                setting to get the full device list with filtering and sorting, answered from the database.
+                See
+                <a href="{% url 'plugins:nautobot_golden_config:docs' %}#backup-history-diff">the documentation</a>.
+                <br>
+                Looking up a single device above still works normally.
+              </div>
+            {% else %}
+              <div class="alert alert-info">
+                Showing recent backup changes read directly from Git. Enable the
+                <code>enable_backup_diff_index</code> setting to get the full device list with filtering and
+                sorting. See
+                <a href="{% url 'plugins:nautobot_golden_config:docs' %}#backup-history-diff">the documentation</a>.
+              </div>
+            {% endif %}
+            {% if recent_changes %}
+              <div class="table-responsive">
+                <table class="table table-hover table-headings">
+                  <thead>
+                    <tr>
+                      <th>Device</th>
+                      <th>Last Backup</th>
+                      <th>Commit</th>
+                      <th>Message</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for row in recent_changes %}
+                      <tr>
+                        <td>{{ row.device|hyperlinked_object }}</td>
+                        <td>{{ row.date }}</td>
+                        <td><code>{{ row.short_sha }}</code></td>
+                        <td>{{ row.message }}</td>
+                        <td class="text-end">
+                          <a href="{% url 'plugins:nautobot_golden_config:backuphistorydiff' %}?device={{ row.device.pk }}"
+                             class="btn btn-xs btn-primary">View Diff</a>
+                        </td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% else %}
+              <div class="alert alert-warning">
+                No backups found yet. Run a backup job, or look up a device above.
+              </div>
+            {% endif %}
+          {% else %}
+            {# No filter controls by design: the table's column headers sort, and the device picker above #}
+            {# finds a single device. BackupVersionFilterSet is still applied to the query string, so a #}
+            {# filtered URL (?device_name=..., ?authored_date__gte=...) still works and stays bookmarkable. #}
+            <form method="post" id="gcd-fleet-form">
+              {% csrf_token %}
+              {% include "inc/table.html" with table=table %}
+              <div class="gcd-fleet-actions">
+                {# Disabled rather than hidden for users without the permission, so the action is still #}
+                {# discoverable and says what it needs. The view enforces it regardless. #}
+                {% if perms.nautobot_golden_config.delete_backupversion %}
+                  <button type="submit"
+                          formaction="{% url 'plugins:nautobot_golden_config:backupversion_bulk_delete' %}"
+                          class="btn btn-danger">
+                    <span class="mdi mdi-trash-can-outline" aria-hidden="true"></span> Bulk Delete Versions
+                  </button>
+                {% else %}
+                  <button type="button"
+                          class="btn btn-danger"
+                          disabled
+                          title="Requires the &quot;Delete backup version&quot; permission on Golden Config.">
+                    <span class="mdi mdi-trash-can-outline" aria-hidden="true"></span> Bulk Delete Versions
+                  </button>
+                {% endif %}
+              </div>
+            </form>
+            {# inc/table.html renders the table only; the page controls and the per-page selector are a #}
+            {# separate include. Outside the POST form above so its own GET form is not nested. #}
+            {% include "inc/paginator.html" with paginator=table.paginator page=table.page %}
+          {% endif %}
+        {% endif %}
+      {% endif %}
+    </div>
+  </div>
+{% endblock content %}
+
+{% block javascript %}
+  {{ block.super }}
+  {# Load the DynamicModelChoiceField (device typeahead) select2/APISelect assets. #}
+  {{ form.media }}
+  <script src="{% static 'nautobot_golden_config/backup_history_diff.js' %}"></script>
+{% endblock javascript %}

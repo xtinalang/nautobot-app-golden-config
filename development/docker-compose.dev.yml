@@ -11,6 +11,8 @@ services:
     volumes:
       - "./nautobot_config.py:/opt/nautobot/nautobot_config.py"
       - "../:/source"
+      # Persist GIT_ROOT so cloned/backup git repos survive container restarts (shared by all 3 services).
+      - "nautobot_git:/opt/nautobot/git"
       # Helper method to mount on top of the python implementations, assuming you are using py3.13 and
       # have all of your projects in the same directory. Uncomment out as required.
       # - "../../netutils/netutils:/usr/local/lib/python3.13/site-packages/netutils"
@@ -46,6 +48,7 @@ services:
     volumes:
       - "./nautobot_config.py:/opt/nautobot/nautobot_config.py"
       - "../:/source"
+      - "nautobot_git:/opt/nautobot/git"
       # Helper method to mount on top of the python implementations, assuming you are using py3.13 and
       # have all of your projects in the same directory. Uncomment out as required.
       # - "../../netutils/netutils:/usr/local/lib/python3.13/site-packages/netutils"
@@ -62,6 +65,11 @@ services:
     volumes:
       - "./nautobot_config.py:/opt/nautobot/nautobot_config.py"
       - "../:/source"
+      - "nautobot_git:/opt/nautobot/git"
+
+volumes:
+  # Named volume backing GIT_ROOT so backup/intended git checkouts persist across restarts.
+  nautobot_git: {}
 # To expose postgres (5432), myql (3306) on db service or redis (6379) to the host uncomment the
 # following. Ensure to match the 2 idented spaces which to have the service nested under services.
 # db:

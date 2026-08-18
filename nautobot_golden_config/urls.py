@@ -24,6 +24,17 @@ router.register("golden-config", views.GoldenConfigUIViewSet)
 urlpatterns = [
     path("config-plan/bulk_deploy/", views.ConfigPlanBulkDeploy.as_view(), name="configplan_bulk-deploy"),
     path("generate-intended-config/", views.GenerateIntendedConfigView.as_view(), name="generate_intended_config"),
+    path("backup-history-diff/", views.BackupHistoryDiffToolView.as_view(), name="backuphistorydiff"),
+    path(
+        "backup-history-diff/<uuid:pk>/",
+        views.BackupHistoryDiffView.as_view(),
+        name="backuphistorydiff_devicetab",
+    ),
+    path(
+        "backup-versions/bulk-delete/",
+        views.BackupVersionBulkDeleteView.as_view(),
+        name="backupversion_bulk_delete",
+    ),
     path("docs/", RedirectView.as_view(url=static("nautobot_golden_config/docs/index.html")), name="docs"),
 ]
 

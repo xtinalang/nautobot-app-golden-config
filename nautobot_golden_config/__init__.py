@@ -28,6 +28,19 @@ class GoldenConfig(NautobotAppConfig):
         "enable_postprocessing": False,
         "enable_plan": True,
         "enable_deploy": True,
+        "enable_backup_diff_index": False,
+        # Device ceiling for the git-native fleet list when the index is off; above it the landing page
+        # skips the walk rather than spending seconds on it. Per-device diffs are never affected.
+        "backup_diff_max_fallback_fleet": 5000,
+        "backup_diff_content_store": "git",
+        # S3/MinIO object-store backend for Backup History Diff (only used when backup_diff_content_store="s3";
+        # requires the optional "s3" extra / boto3). Empty bucket => this backend no-ops to git. AWS
+        # credentials come from the standard AWS chain (IAM role / env), never from here.
+        "backup_diff_s3_bucket": "",
+        "backup_diff_s3_prefix": "",
+        "backup_diff_s3_endpoint_url": "",
+        "backup_diff_s3_region": "",
+        "backup_diff_s3_sse": "",
         "default_deploy_status": "Not Approved",
         "postprocessing_callables": [],
         "postprocessing_subscribed": [],

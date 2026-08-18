@@ -1,0 +1,28 @@
+{% extends "dcim/device.html" %}
+{% load helpers %}
+{% load static %}
+
+{% block title %}{{ object }} - Backup History Diff{% endblock title %}
+
+{% block extra_styles %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'nautobot_golden_config/backup_history_diff.css' %}">
+{% endblock extra_styles %}
+
+{% block content %}
+  <div class="row">
+    <div class="col-md-12">
+      <h4>Backup History Diff</h4>
+      <p class="text-muted">
+        Git-native side-by-side diff of <strong>{{ device }}</strong>'s backup configuration history,
+        always shown oldest &rarr; newest. Configs are read directly from the backup Git repository.
+      </p>
+      {% include "nautobot_golden_config/inc/backup_history_diff_body.html" %}
+    </div>
+  </div>
+{% endblock content %}
+
+{% block javascript %}
+  {{ block.super }}
+  <script src="{% static 'nautobot_golden_config/backup_history_diff.js' %}"></script>
+{% endblock javascript %}

@@ -2,6 +2,7 @@
 
 import django_filters
 from nautobot.apps.filters import (
+    BaseFilterSet,
     MultiValueDateTimeFilter,
     NaturalKeyOrPKMultipleChoiceFilter,
     NautobotFilterSet,
@@ -449,4 +450,41 @@ class ConfigPlanFilterSet(NautobotFilterSet):
         """Boilerplate filter Meta data for Config Plan."""
 
         model = models.ConfigPlan
+        fields = "__all__"
+
+
+class BackupVersionFilterSet(BaseFilterSet):
+    """Filter capabilities for the Backup History Diff index.
+
+    ``BaseFilterSet`` rather than ``NautobotFilterSet``: ``BackupVersion`` is an internal index built on
+    ``BaseModel``, so it has no custom fields, tags, or relationships for the Nautobot mixins to filter on.
+
+    ``authored_date`` is a ``MultiValueDateTimeFilter`` so ``BaseFilterSet`` generates the range lookups
+    (``authored_date__gte`` / ``__lte`` / ``__lt`` / ``__gt``) that the fleet view's "last updated" filter
+    posts, without declaring each one by hand.
+    """
+
+    q = SearchFilter(
+        filter_predicates={
+            "device__name": "icontains",
+            "message": "icontains",
+            "commit_sha": "istartswith",
+        },
+    )
+    device = NaturalKeyOrPKMultipleChoiceFilter(
+        queryset=Device.objects.all(),
+        to_field_name="name",
+        label="Device (name or ID)",
+    )
+    device_name = django_filters.CharFilter(
+        field_name="device__name",
+        lookup_expr="icontains",
+        label="Device name contains",
+    )
+    authored_date = MultiValueDateTimeFilter()
+
+    class Meta:
+        """Boilerplate filter Meta data for Backup Version."""
+
+        model = models.BackupVersion
         fields = "__all__"

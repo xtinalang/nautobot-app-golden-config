@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% load helpers %}
+{% load static %}
+
+{% block title %}Delete Backup Versions{% endblock title %}
+
+{% block extra_styles %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'nautobot_golden_config/backup_history_diff.css' %}">
+{% endblock extra_styles %}
+
+{% block content %}
+  <div class="row">
+    <div class="col-md-12">
+      <h1>Delete Backup Versions</h1>
+      <p class="text-muted">
+        {{ total_versions }} backed-up version{{ total_versions|pluralize }} across the {{ device_count }}
+        selected device{{ device_count|pluralize }}. Choose the version records to delete.
+      </p>
+      {% if page.paginator.num_pages > 1 %}
+        <div class="alert alert-info">
+          These versions span {{ page.paginator.num_pages }} pages. <strong>Deleting applies to the
+          selections on this page only</strong> &mdash; moving to another page clears them. To trim a lot of
+          history at once, set a retention window on the Golden Config Setting and run the
+          <strong>Clean Up Backup Version Table</strong> job instead.
+        </div>
+      {% endif %}
+      <div class="alert alert-info">
+        <strong>This removes index records only.</strong> The configurations themselves stay in the backup Git
+        repository and are not modified. Each device's most recent version is locked and cannot be deleted,
+        because the diff and history views default to it.
+      </div>
+      <div class="alert alert-warning">
+        Deleted records can usually be rebuilt by the <strong>Sync Backup Version Table</strong> job, but
+        not unconditionally: it reaches only as far back as its commit limit, and it can only re-map history
+        for devices whose backup path still renders the same today. Treat this as a one-way trim.
+      </div>
+
+      {% if versions %}
+        <form method="post">
+          {% csrf_token %}
+          <input type="hidden" name="confirm" value="true">
+          <div class="table-responsive">
+            <table class="table table-hover table-headings">
+              <thead>
+                <tr>
+                  <th></th>
+                  <th>Device</th>
+                  <th>Backed Up</th>
+                  <th>Commit</th>
+                  <th>Author</th>
+                  <th>Message</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for version in versions %}
+                  <tr>
+                    <td>
+                      {% if version.pk in latest_pks %}
+                        <input type="checkbox" disabled title="A device's most recent version cannot be deleted">
+                      {% else %}
+                        <input type="checkbox" name="version_pk" value="{{ version.pk }}">
+                      {% endif %}
+                    </td>
+                    <td>{{ version.device|hyperlinked_object }}</td>
+                    <td>{{ version.authored_date }}</td>
+                    <td><code>{{ version.commit_sha|slice:":8" }}</code></td>
+                    <td>{{ version.committer|placeholder }}</td>
+                    <td>
+                      {{ version.message|placeholder }}
+                      {% if version.pk in latest_pks %}
+                        <span class="label label-default">latest</span>
+                      {% endif %}
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <div class="gcd-fleet-actions">
+            <button type="submit" class="btn btn-danger">
+              <span class="mdi mdi-trash-can-outline" aria-hidden="true"></span> Delete Selected
+            </button>
+            <a href="{{ return_url }}" class="btn btn-default">Cancel</a>
+          </div>
+        </form>
+        {# Outside the POST form above: the paginator renders its own GET form, which must not nest. #}
+        {% include "inc/paginator.html" with paginator=paginator page=page %}
+      {% else %}
+        <div class="alert alert-warning">No backup versions found for the selected devices.</div>
+        <a href="{{ return_url }}" class="btn btn-default">Back</a>
+      {% endif %}
+    </div>
+  </div>
+{% endblock content %}
