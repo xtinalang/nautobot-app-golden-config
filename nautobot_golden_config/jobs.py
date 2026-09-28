@@ -30,7 +30,7 @@ from nautobot_plugin_nornir.plugins.inventory.nautobot_orm import NautobotORMInv
 from nornir.core.plugins.inventory import InventoryPluginRegister
 from nornir_nautobot.exceptions import NornirNautobotException
 
-from nautobot_golden_config.choices import ConfigPlanTypeChoice
+from nautobot_golden_config.choices import BackupDiffWindowChoice, ConfigPlanTypeChoice
 from nautobot_golden_config.exceptions import BackupFailure, ComplianceFailure, IntendedGenerationFailure
 from nautobot_golden_config.models import ComplianceFeature, ConfigPlan, GoldenConfig
 from nautobot_golden_config.nornir_plays.config_backup import config_backup
@@ -660,6 +660,12 @@ class SyncGoldenConfigWithDynamicGroups(Job):
 class SyncBackupVersionTable(Job):
     """Reconcile the Backup History Diff index against the backup history already in Git."""
 
+    from_date = ChoiceVar(
+        choices=BackupDiffWindowChoice,
+        required=False,
+        label="From Date",
+        description="Only read commits from this far back. Applies alongside the commit cap below.",
+    )
     max_commits_per_repo = IntegerVar(
         default=1000,
         label="Max Commits Per Repository",
@@ -678,14 +684,17 @@ class SyncBackupVersionTable(Job):
         description = "Rebuild the backup version table from the history in your backup repositories."
         has_sensitive_variables = False
 
-    def run(self, max_commits_per_repo=1000, dry_run=True):  # pylint: disable=arguments-differ
+    def run(self, from_date=None, max_commits_per_repo=1000, dry_run=True):  # pylint: disable=arguments-differ
         """Reconcile the index against Git, reporting what was (or would be) written."""
         # Imported here so the ingest module is only loaded when the job actually runs.
         from nautobot_golden_config.utilities.backup_diff_ingest import (  # pylint: disable=import-outside-toplevel
             backfill_index,
         )
 
-        stats = backfill_index(max_commits_per_repo=max_commits_per_repo, dry_run=dry_run)
+        since_days = int(from_date) if from_date else None
+        stats = backfill_index(max_commits_per_repo=max_commits_per_repo, dry_run=dry_run, since_days=since_days)
+        window = f"the last {since_days} days" if since_days else "all available history"
+        self.logger.info(f"Reading {window} from each backup repository.")
         self.logger.info(f"Walked {stats['commits']} commit(s) across {stats['repositories']} repository(ies).")
 
         # Both of these mean "recovered less history than you may think", so say so rather than letting a
@@ -719,6 +728,16 @@ class SyncBackupVersionTable(Job):
 class CleanUpBackupVersionTable(Job):
     """Prune Backup History Diff index records past their setting's retention window."""
 
+    from_date = ChoiceVar(
+        choices=BackupDiffWindowChoice,
+        required=False,
+        label="From Date",
+        description=(
+            "Optional: keep only this far back for every device, overriding the retention fields on each "
+            "Golden Config Setting for this run. Use it to trim the table to the same window the sync job "
+            "reads. Leave blank to apply the configured retention instead."
+        ),
+    )
     dry_run = BooleanVar(
         default=True,
         label="Dry Run",
@@ -732,14 +751,20 @@ class CleanUpBackupVersionTable(Job):
         description = "Remove backup version records that fall outside your retention settings."
         has_sensitive_variables = False
 
-    def run(self, dry_run=True):  # pylint: disable=arguments-differ
+    def run(self, from_date=None, dry_run=True):  # pylint: disable=arguments-differ
         """Prune index records per device, honouring the highest-weighted setting for each."""
         # Imported here so the retention module (and the ORM it touches) is only loaded when the job runs.
         from nautobot_golden_config.utilities.backup_retention import (  # pylint: disable=import-outside-toplevel
             prune_backup_versions,
         )
 
-        results = prune_backup_versions(dry_run=dry_run)
+        window_days = int(from_date) if from_date else None
+        if window_days:
+            self.logger.warning(
+                f"Overriding per-setting retention: keeping only the last {window_days} days for every "
+                "device in backup scope. A device's newest version is still never removed."
+            )
+        results = prune_backup_versions(dry_run=dry_run, window_days=window_days)
         verb = "Would prune" if dry_run else "Pruned"
         for result in results:
             kept = []

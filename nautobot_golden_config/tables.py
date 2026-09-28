@@ -568,7 +568,6 @@ BACKUP_VERSION_DIFF_LINK = """
 
 
 class BackupVersionTable(BaseTable):
-    # pylint: disable=R0903
     """Fleet-wide table of backed-up configuration versions.
 
     Backs the Backup History Diff landing page, where it is narrowed to one row per device (that device's

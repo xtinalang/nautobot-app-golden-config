@@ -23,9 +23,10 @@ one way only.
 
 import logging
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from django.db.models import Q
+from django.utils.timezone import now
 from git import GitCommandError
 
 from nautobot_golden_config.utilities.config_diff import commit_subject, open_repo, path_device_map
@@ -153,7 +154,7 @@ def safe_build_commit_events(repository_record, commit_sha):
         return []
 
 
-def backfill_index(max_commits_per_repo=1000, batch_size=5000, dry_run=True):
+def backfill_index(max_commits_per_repo=1000, batch_size=5000, dry_run=True, since_days=None):
     """Populate the index from backup history that already exists in git.
 
     The ingest hook only records commits made *after* it is enabled, so on an existing fleet the index
@@ -182,6 +183,9 @@ def backfill_index(max_commits_per_repo=1000, batch_size=5000, dry_run=True):
         max_commits_per_repo (int): How deep to walk each repository's history.
         batch_size (int): Rows per ``bulk_create``.
         dry_run (bool): When ``True``, count what would be written without writing.
+        since_days (int | None): Only read commits from the last N days. Bounds the walk by time as well
+            as by count -- both limits apply, so whichever is reached first stops the read. ``None`` reads
+            as far back as ``max_commits_per_repo`` allows.
 
     Returns:
         dict: ``{"repositories", "commits", "rows", "written", "capped_repositories", "unmapped_paths",
@@ -202,11 +206,15 @@ def backfill_index(max_commits_per_repo=1000, batch_size=5000, dry_run=True):
         "rows": 0,
         "written": 0,
         "capped_repositories": [],
+        "since_days": since_days,
         "unmapped_paths": 0,
         "unmapped_sample": [],
     }
     unmapped = set()
     pending = []
+    # Resolve the window once, so every repository in this run reads from the same instant rather than
+    # drifting as the walk proceeds.
+    since = now() - timedelta(days=int(since_days)) if since_days else None
     # Measure inserts by counting the table, NOT by len(bulk_create(...)): with ignore_conflicts=True
     # Django returns every object it was handed, including the ones the database skipped, so trusting it
     # would report a full re-index on every re-run when nothing was actually written.
@@ -229,7 +237,9 @@ def backfill_index(max_commits_per_repo=1000, batch_size=5000, dry_run=True):
         stats["repositories"] += 1
         commits_here = 0
         try:
-            for sha, authored_date, author, subject, changes in iter_commit_blob_changes(repo, max_commits_per_repo):
+            for sha, authored_date, author, subject, changes in iter_commit_blob_changes(
+                repo, max_commits_per_repo, since=since
+            ):
                 stats["commits"] += 1
                 commits_here += 1
                 for path, blob_sha in changes:

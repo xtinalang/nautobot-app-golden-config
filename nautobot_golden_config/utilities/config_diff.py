@@ -176,32 +176,36 @@ def get_config_at_commit(device, sha):
         return None
 
 
-def _iter_commit_file_changes(repo, max_count):
-    """Yield ``(sha, authored_date, author, subject, changed_paths)`` for a repo's newest commits.
+def _iter_commit_log(repo, max_count, *diff_args):
+    """Yield ``(sha, authored_date, author, subject, body)`` for a repo's newest commits.
 
-    Exactly ONE ``git log`` subprocess per repository. The obvious implementation -- iterating
+    The shared half of the two readers below: one ``git log`` subprocess per repository, the custom
+    record/field format, and the header parsing. Callers pass the flags that decide what lands in ``body``
+    (``--name-only`` for paths, ``--raw`` for paths plus blob hashes) and parse it themselves.
+
+    Exactly ONE subprocess per repository is the point. The obvious implementation -- iterating
     ``repo.iter_commits()`` and reading ``commit.stats.files`` -- makes GitPython shell out to
     ``git diff --numstat`` *once per commit*, so walking a few hundred commits on a web request means a
-    few hundred process spawns. ``git log --name-only`` returns the same information in one process.
+    few hundred process spawns.
 
     ``--first-parent`` keeps traversal on the mainline, matching the "diff against the first parent"
-    semantics of ``commit.stats.files``. Merge commits themselves list no files under ``--name-only`` and
-    are simply skipped -- the backup commit that introduced the change is on the first-parent line anyway.
+    semantics of ``commit.stats.files``. Merge commits list no files either way and fall out naturally.
 
     Args:
         repo (git.Repo): The opened backup repository.
         max_count (int): Cap on how many commits to walk (newest first).
+        *diff_args: Extra ``git log`` flags controlling the per-commit body.
 
     Yields:
-        tuple[str, datetime, str, str, set[str]]: Commit metadata plus the paths it changed.
+        tuple[str, datetime, str, str, str]: Commit metadata plus the raw body for the caller to parse.
     """
     log_format = _LOG_RECORD_SEP + _LOG_FIELD_SEP.join(["%H", "%aI", "%an", "%s"])
     raw = repo.git.log(
         f"--max-count={max_count}",
         "--first-parent",
-        "--name-only",
         "--no-renames",
         f"--format={log_format}",
+        *diff_args,
     )
     for record in raw.split(_LOG_RECORD_SEP):
         if not record.strip():
@@ -218,10 +222,27 @@ def _iter_commit_file_changes(repo, max_count):
             authored_date = datetime.fromisoformat(date_str)
         except ValueError:
             continue
-        yield sha, authored_date, author, subject.strip(), {line for line in body.splitlines() if line}
+        yield sha, authored_date, author, subject.strip(), body
 
 
-def iter_commit_blob_changes(repo, max_count):
+def _iter_commit_file_changes(repo, max_count):
+    """Yield ``(sha, authored_date, author, subject, changed_paths)`` for a repo's newest commits.
+
+    ``--name-only`` gives one path per line, which is all the fleet-wide "what changed most recently"
+    read needs. See ``_iter_commit_log`` for why this is a single subprocess.
+
+    Args:
+        repo (git.Repo): The opened backup repository.
+        max_count (int): Cap on how many commits to walk (newest first).
+
+    Yields:
+        tuple[str, datetime, str, str, set[str]]: Commit metadata plus the paths it changed.
+    """
+    for sha, authored_date, author, subject, body in _iter_commit_log(repo, max_count, "--name-only"):
+        yield sha, authored_date, author, subject, {line for line in body.splitlines() if line}
+
+
+def iter_commit_blob_changes(repo, max_count, since=None):
     r"""Yield ``(sha, authored_date, author, subject, [(path, blob_sha), ...])`` for a repo's newest commits.
 
     Like ``_iter_commit_file_changes`` but also carries each changed file's **resulting blob hash**, which
@@ -242,31 +263,18 @@ def iter_commit_blob_changes(repo, max_count):
         repo (git.Repo): The opened backup repository.
         max_count (int): Cap on how many commits to walk (newest first).
 
+    Args (continued):
+        since (datetime | None): When given, only commits at or after this instant are read, via
+            ``git log --since``. Bounds the walk by time in the same single subprocess, so asking for
+            "the last 90 days" costs no more than asking for everything.
+
     Yields:
         tuple[str, datetime, str, str, list[tuple[str, str]]]: Commit metadata plus (path, blob_sha) pairs.
     """
-    log_format = _LOG_RECORD_SEP + _LOG_FIELD_SEP.join(["%H", "%aI", "%an", "%s"])
-    raw = repo.git.log(
-        f"--max-count={max_count}",
-        "--first-parent",
-        "--raw",
-        "--no-abbrev",
-        "--no-renames",
-        f"--format={log_format}",
-    )
-    for record in raw.split(_LOG_RECORD_SEP):
-        if not record.strip():
-            continue
-        header, _, body = record.partition("\n")
-        fields = header.split(_LOG_FIELD_SEP)
-        if len(fields) < 4:
-            continue
-        sha, date_str, author = fields[0], fields[1], fields[2]
-        subject = _LOG_FIELD_SEP.join(fields[3:])
-        try:
-            authored_date = datetime.fromisoformat(date_str)
-        except ValueError:
-            continue
+    extra = ["--raw", "--no-abbrev"]
+    if since is not None:
+        extra.append(f"--since={since.isoformat()}")
+    for sha, authored_date, author, subject, body in _iter_commit_log(repo, max_count, *extra):
         changes = []
         for line in body.splitlines():
             if not line.startswith(":"):

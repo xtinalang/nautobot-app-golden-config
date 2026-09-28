@@ -69,7 +69,7 @@ def _stale_pks_for_device(ordered, retention_days, retention_count, current_time
     return stale
 
 
-def plan_backup_version_pruning():
+def plan_backup_version_pruning(window_days=None):
     """Return the per-device prune plan, newest-record-protected, without deleting anything.
 
     Resolves each device's setting through ``get_device_to_settings_map`` so weighting is respected: a
@@ -79,6 +79,14 @@ def plan_backup_version_pruning():
     Reads every version in ONE query and groups in Python rather than querying per device. The per-device
     form was O(devices) round trips, which on a large fleet is thousands of queries for what is a single
     ordered scan -- the same trap ``config_diff.path_device_map`` documents.
+
+    Args:
+        window_days (int | None): When given, ignore the per-setting retention fields and keep only the
+            last N days for EVERY device in backup scope. This is the explicit one-run override behind the
+            job's "From Date": it trims the index to the same window the sync job reads, which the
+            per-setting rules deliberately will not do because their count floor exists to keep a quiet
+            device's history alive. Because it overrides that floor it can remove more than the configured
+            policy would -- which is the point, and why it is opt-in per run rather than a setting.
 
     Returns:
         list[tuple[PruneResult, list]]: ``(result, stale_pks)`` per device with something to prune.
@@ -111,10 +119,14 @@ def plan_backup_version_pruning():
 
     plan = []
     for device_id, setting in settings_map.items():
-        retention_days = getattr(setting, "backup_retention_days", None)
-        retention_count = getattr(setting, "backup_retention_count", None)
-        if not retention_days and not retention_count:
-            continue  # retention not configured for this scope -- keep everything
+        if window_days:
+            # Override: one window for every device, and no count floor to rescue older records.
+            retention_days, retention_count = int(window_days), None
+        else:
+            retention_days = getattr(setting, "backup_retention_days", None)
+            retention_count = getattr(setting, "backup_retention_count", None)
+            if not retention_days and not retention_count:
+                continue  # retention not configured for this scope -- keep everything
         stale_pks = _stale_pks_for_device(by_device.get(device_id, []), retention_days, retention_count, current_time)
         if stale_pks:
             plan.append(
@@ -126,12 +138,15 @@ def plan_backup_version_pruning():
     return plan
 
 
-def prune_backup_versions(dry_run=True, batch_size=DELETE_BATCH_SIZE):
+def prune_backup_versions(dry_run=True, batch_size=DELETE_BATCH_SIZE, window_days=None):
     """Apply (or preview) index retention and return the per-device results.
 
     Args:
         dry_run (bool): When ``True``, compute the plan but delete nothing.
         batch_size (int): How many records to delete per statement.
+        window_days (int | None): One-run override keeping only the last N days for every device in
+            backup scope, in place of the per-setting retention fields. See
+            ``plan_backup_version_pruning``.
 
     Returns:
         list[PruneResult]: One entry per device that had records outside its retention window.
@@ -139,7 +154,7 @@ def prune_backup_versions(dry_run=True, batch_size=DELETE_BATCH_SIZE):
     # Lazy import to avoid an import cycle with the utilities package models imports at load time.
     from nautobot_golden_config.models import BackupVersion  # pylint: disable=import-outside-toplevel
 
-    plan = plan_backup_version_pruning()
+    plan = plan_backup_version_pruning(window_days=window_days)
     if not dry_run:
         stale_pks = [pk for _, pks in plan for pk in pks]
         # Batched rather than one `pk__in` over the whole plan: a first prune on a fleet that has been
